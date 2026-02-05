@@ -1,3 +1,4 @@
+
 import os
 import platform
 import time
@@ -46,6 +47,7 @@ LOGOUT_SEL = 'a[href="/logout"].action-btn.ghost'
 
 # ✅ server 页面加载成功标志：出现 “Now managing”
 NOW_MANAGING_XPATH = 'xpath=//p[contains(normalize-space(.), "Now managing")]'
+NOW_MANAGING_NAME_XPATH = 'xpath=//p[contains(normalize-space(.), "Now managing")]/following-sibling::h1[1]'  # FIX
 
 # ✅ 服务器卡片（你给的）：<a href="/servers/12399" class="server-card">
 SERVER_CARD_LINK_SEL = 'a.server-card[href^="/servers/"]'
@@ -64,6 +66,12 @@ def mask_email_keep_domain(email: str) -> str:
         name_mask = name[0] + ("*" * (len(name) - 2)) + name[-1]
     return f"{name_mask}@{domain}"
 
+
+
+def mask_url_hide_server_id(url: str) -> str:
+    """# FIX: Hide /servers/<id> in URLs to avoid leaking sensitive server_id."""
+    u = (url or "").strip()
+    return re.sub(r"/servers\d+", "/servers/***", u)
 
 def setup_xvfb():
     if platform.system().lower() == "linux" and not os.environ.get("DISPLAY"):
@@ -229,9 +237,20 @@ def _extract_server_id_from_href(href: str) -> Optional[str]:
         return None
     m = re.search(r"/servers/(\d+)", href)
     return m.group(1) if m else None
+def _get_server_name(sb: SB) -> Optional[str]:
+    """# FIX: Read server name from server page (the <h1> next to 'Now managing')."""
+    try:
+        if sb.is_element_visible(NOW_MANAGING_NAME_XPATH):
+            name = (sb.get_text(NOW_MANAGING_NAME_XPATH) or "").strip()
+            return name or None
+    except Exception:
+        pass
+    return None
 
 
-def _find_server_id_and_go_server_page(sb: SB) -> Tuple[Optional[str], bool]:
+
+
+def _find_server_id_and_go_server_page(sb: SB) -> Tuple[Optional[str], Optional[str], bool]:  # FIX
     """
     在登录成功后的页面里：
       - 找到 a.server-card[href^="/servers/"]
@@ -245,7 +264,7 @@ def _find_server_id_and_go_server_page(sb: SB) -> Tuple[Optional[str], bool]:
         sb.wait_for_element_visible(SERVER_CARD_LINK_SEL, timeout=25)
     except Exception:
         screenshot(sb, f"server_card_not_found_{int(time.time())}.png")
-        return None, False
+        return None, None, False
 
     try:
         href = sb.get_attribute(SERVER_CARD_LINK_SEL, "href") or ""
@@ -255,33 +274,33 @@ def _find_server_id_and_go_server_page(sb: SB) -> Tuple[Optional[str], bool]:
     server_id = _extract_server_id_from_href(href)
     if not server_id:
         screenshot(sb, f"server_id_extract_failed_{int(time.time())}.png")
-        return None, False
+        return None, None, False
 
     server_url = SERVER_URL_TPL.format(server_id=server_id)
 
     # ✅ 进入 server 页面：优先 click（模拟人）
     try:
-        print(f"🧭 提取到 server_id={server_id}，优先点击 server-card 跳转...")  # FIX
+        print("🧭 优先点击 server-card 跳转到 server 页面...")  # FIX
 
         url_before = (sb.get_current_url() or "").strip()
         clicked = _robust_click(sb, SERVER_CARD_LINK_SEL, tries=3, sleep_s=0.7)  # FIX
         url_after = (sb.get_current_url() or "").strip()
 
-        print(f"🔎 URL(before)={url_before}")  # FIX
-        print(f"🔎 URL(after )={url_after}")  # FIX
+        print(f"🔎 URL(before)={mask_url_hide_server_id(url_before)}")  # FIX
+        print(f"🔎 URL(after )={mask_url_hide_server_id(url_after)}")  # FIX
 
         if not clicked:
             raise Exception("robust_click failed")
 
         # 进入 /servers/xxx 后也可能弹 CF（这里再补一次）  # FIX
-        # _try_click_captcha(sb, "进入 server 页后")  # CF  # FIX
+        _try_click_captcha(sb, "进入 server 页后")  # CF  # FIX
         sb.wait_for_element_visible("body", timeout=30)
 
         # ✅ 双判据：Now managing 或 URL 已到 /servers/{id}（避免 SPA 慢渲染误判）  # FIX
         for _ in range(30):
             try:
                 if sb.is_element_visible(NOW_MANAGING_XPATH):
-                    return server_id, True
+                    return server_id, _get_server_name(sb), True  # FIX
             except Exception:
                 pass
 
@@ -290,7 +309,7 @@ def _find_server_id_and_go_server_page(sb: SB) -> Tuple[Optional[str], bool]:
                 if f"/servers/{server_id}" in u:
                     # 给 SPA 一点渲染时间
                     time.sleep(1)
-                    return server_id, True
+                    return server_id, _get_server_name(sb), True  # FIX
             except Exception:
                 pass
 
@@ -301,19 +320,19 @@ def _find_server_id_and_go_server_page(sb: SB) -> Tuple[Optional[str], bool]:
     except Exception:
         # ❗ 模拟人失败：最后降级 open 目标 URL  # FIX
         try:
-            print(f"⚠️ 点击跳转失败，降级为直接打开：{server_url}")  # FIX
+            print("⚠️ 点击跳转失败，降级为直接打开 server_url（已隐藏 server_id）")  # FIX
             sb.open(server_url)
             sb.wait_for_element_visible("body", timeout=30)
             _try_click_captcha(sb, "open server_url 后")  # CF  # FIX
             sb.wait_for_element_visible(NOW_MANAGING_XPATH, timeout=30)
-            return server_id, True
+            return server_id, _get_server_name(sb), True  # FIX
         except Exception:
             screenshot(sb, f"goto_server_failed_{int(time.time())}.png")
-            return server_id, False
+            return server_id, None, False  # FIX
 
 
 
-def _post_login_visit_then_logout(sb: SB) -> Tuple[Optional[str], bool]:
+def _post_login_visit_then_logout(sb: SB) -> Tuple[Optional[str], Optional[str], bool]:  # FIX
     """
     登录成功后：
       0) 从 Manage Servers 卡片中提取 server_id，并进入 server 页（等待 Now managing）
@@ -323,9 +342,9 @@ def _post_login_visit_then_logout(sb: SB) -> Tuple[Optional[str], bool]:
     返回 (server_id, logout_ok)
     """
     # 0) 提取 server_id 并进 server 页
-    server_id, entered_ok = _find_server_id_and_go_server_page(sb)
+    server_id, server_name, entered_ok = _find_server_id_and_go_server_page(sb)  # FIX
     if not entered_ok:
-        return server_id, False
+        return server_id, None, False  # FIX
 
     # 1) server 页停留
     stay1 = random.randint(4, 6)
@@ -339,7 +358,7 @@ def _post_login_visit_then_logout(sb: SB) -> Tuple[Optional[str], bool]:
         sb.wait_for_element_visible("body", timeout=30)
     except Exception:
         screenshot(sb, f"back_home_failed_{int(time.time())}.png")
-        return server_id, False
+        return server_id, None, False  # FIX
 
     stay2 = random.randint(3, 5)
     print(f"⏳ 首页停留 {stay2} 秒...")
@@ -359,7 +378,7 @@ def _post_login_visit_then_logout(sb: SB) -> Tuple[Optional[str], bool]:
             sb.open(logout_url)  # FIX
         except Exception:
             screenshot(sb, f"logout_click_failed_{int(time.time())}.png")
-            return server_id, False
+            return server_id, None, False  # FIX
 
     # logout 后也可能弹 CF / 重定向中间页  # FIX
     _try_click_captcha(sb, "logout 后")  # CF  # FIX
@@ -374,21 +393,21 @@ def _post_login_visit_then_logout(sb: SB) -> Tuple[Optional[str], bool]:
             url_now = ""
 
         if "/login" in url_now:
-            return server_id, True
+            return server_id, _get_server_name(sb), True  # FIX
 
         try:
             if sb.is_element_visible(EMAIL_SEL) and sb.is_element_visible(PASS_SEL):
-                return server_id, True
+                return server_id, _get_server_name(sb), True  # FIX
         except Exception:
             pass
 
         time.sleep(1)
 
     screenshot(sb, f"logout_verify_failed_{int(time.time())}.png")
-    return server_id, False
+    return server_id, None, False  # FIX
 
 
-def login_then_flow_one_account(email: str, password: str) -> Tuple[str, Optional[str], bool, str, Optional[str], bool]:
+def login_then_flow_one_account(email: str, password: str) -> Tuple[str, Optional[str], bool, str, Optional[str], bool]:  # FIX server_name
     """
     返回：
       (status, welcome_text, has_cf_clearance, current_url, server_id, logout_ok)
@@ -412,7 +431,7 @@ def login_then_flow_one_account(email: str, password: str) -> Tuple[str, Optiona
             sb.wait_for_element_visible(SUBMIT_SEL, timeout=25)
         except Exception:
             url_now = sb.get_current_url() or ""
-            return "FAIL", None, _has_cf_clearance(sb), url_now, None, False
+            return "FAIL", None, _has_cf_clearance(sb), mask_url_hide_server_id(url_now), None, False  # FIX
 
         sb.clear(EMAIL_SEL)
         sb.type(EMAIL_SEL, email)
@@ -425,6 +444,8 @@ def login_then_flow_one_account(email: str, password: str) -> Tuple[str, Optiona
         sb.click(SUBMIT_SEL)
         sb.wait_for_element_visible("body", timeout=30)
         time.sleep(2)
+
+        # screenshot(sb, f"login_ready_01_{int(time.time())}.png")
 
         # CF: 提交后再试一次（很多站是提交后才弹）
         _try_click_captcha(sb, "提交后")  # CF
@@ -443,10 +464,10 @@ def login_then_flow_one_account(email: str, password: str) -> Tuple[str, Optiona
             time.sleep(1)
 
         if not logged_in:
-            return "FAIL", welcome_text, has_cf, current_url, None, False
+            return "FAIL", welcome_text, has_cf, mask_url_hide_server_id(current_url), None, False  # FIX
 
         # ===== 业务：登录后提取 server_id -> 进 server 页 -> 回首页 -> 退出 =====
-        server_id, logout_ok = _post_login_visit_then_logout(sb)
+        server_id, server_name, logout_ok = _post_login_visit_then_logout(sb)  # FIX
 
         # 更新一下当前 URL
         try:
@@ -454,7 +475,7 @@ def login_then_flow_one_account(email: str, password: str) -> Tuple[str, Optiona
         except Exception:
             pass
 
-        return "OK", welcome_text, has_cf, current_url, server_id, logout_ok
+        return "OK", welcome_text, has_cf, mask_url_hide_server_id(current_url), server_name, logout_ok  # FIX
 
 
 def main():
@@ -482,7 +503,8 @@ def main():
             print("=" * 70)
 
             try:
-                status, welcome_text, has_cf, url_now, server_id, logout_ok = login_then_flow_one_account(
+                status, welcome_text, has_cf, url_now, server_name, logout_ok = login_then_flow_one_account(  # FIX
+
                     email, password
                 )
 
@@ -493,7 +515,7 @@ def main():
                     msg = (
                         f"✅ Lunes BetaDash 登录成功\n"
                         f"账号：{safe_email}\n"
-                        f"server_id：{server_id or '未提取到'}\n"
+                        f"服务器：{server_name or '未读取到'}\n"  # FIX
                         f"welcome：{welcome_text or '未读取到'}\n"
                         f"退出：{'✅ 成功' if logout_ok else '❌ 失败'}\n"
                         f"当前页：{url_now}\n"
