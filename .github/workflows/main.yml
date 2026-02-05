@@ -2,7 +2,7 @@ name: lunes Auto Login
 
 on:
   schedule:
-    - cron: "03 18 * * *"   # 每天 UTC 01:03（北京时间 09:03）
+    - cron: "11 2 * * 0" # 每周日 UTC 02:11（北京时间 10:11）
   workflow_dispatch:
 
 permissions:
