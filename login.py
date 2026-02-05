@@ -268,7 +268,8 @@ def _find_server_id_and_go_server_page(sb: SB) -> Tuple[Optional[str], bool]:
         url_after = (sb.get_current_url() or "").strip()
 
         print(f"🔎 URL(before)={url_before}")  # FIX
-        print(f"🔎 URL(after )={url_after}")  # FIX
+        # todo 这里应该不用打印了 你可以放开
+        #print(f"🔎 URL(after )={url_after}")  # FIX
 
         if not clicked:
             raise Exception("robust_click failed")
