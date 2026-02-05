@@ -71,7 +71,7 @@ def mask_email_keep_domain(email: str) -> str:
 def mask_url_hide_server_id(url: str) -> str:
     """# FIX: Hide /servers/<id> in URLs to avoid leaking sensitive server_id."""
     u = (url or "").strip()
-    return re.sub(r"/servers\d+", "/servers/***", u)
+    return re.sub(r"/servers/\d+", "/servers/***", u)  # FIX
 
 def setup_xvfb():
     if platform.system().lower() == "linux" and not os.environ.get("DISPLAY"):
@@ -238,17 +238,21 @@ def _extract_server_id_from_href(href: str) -> Optional[str]:
     m = re.search(r"/servers/(\d+)", href)
     return m.group(1) if m else None
 def _get_server_name(sb: SB) -> Optional[str]:
-    """# FIX: Read server name from server page (the <h1> next to 'Now managing')."""
-    try:
-        if sb.is_element_visible(NOW_MANAGING_NAME_XPATH):
-            name = (sb.get_text(NOW_MANAGING_NAME_XPATH) or "").strip()
-            return name or None
-    except Exception:
-        pass
+    """# FIX: Read server name from server page (the <h1> next to 'Now managing').
+    Why name might be None:
+      - SPA renders <h1> a bit later than the 'Now managing' <p>
+      - We accidentally try to read name after leaving server page (e.g. after logout)
+    """
+    for _ in range(10):  # retry up to ~3s
+        try:
+            if sb.is_element_visible(NOW_MANAGING_NAME_XPATH):
+                name = (sb.get_text(NOW_MANAGING_NAME_XPATH) or "").strip()
+                if name:
+                    return name
+        except Exception:
+            pass
+        time.sleep(0.3)
     return None
-
-
-
 
 def _find_server_id_and_go_server_page(sb: SB) -> Tuple[Optional[str], Optional[str], bool]:  # FIX
     """
@@ -300,7 +304,7 @@ def _find_server_id_and_go_server_page(sb: SB) -> Tuple[Optional[str], Optional[
         for _ in range(30):
             try:
                 if sb.is_element_visible(NOW_MANAGING_XPATH):
-                    return server_id, _get_server_name(sb), True  # FIX
+                    return server_id, server_name, True  # FIX
             except Exception:
                 pass
 
@@ -309,7 +313,7 @@ def _find_server_id_and_go_server_page(sb: SB) -> Tuple[Optional[str], Optional[
                 if f"/servers/{server_id}" in u:
                     # 给 SPA 一点渲染时间
                     time.sleep(1)
-                    return server_id, _get_server_name(sb), True  # FIX
+                    return server_id, server_name, True  # FIX
             except Exception:
                 pass
 
@@ -325,7 +329,7 @@ def _find_server_id_and_go_server_page(sb: SB) -> Tuple[Optional[str], Optional[
             sb.wait_for_element_visible("body", timeout=30)
             _try_click_captcha(sb, "open server_url 后")  # CF  # FIX
             sb.wait_for_element_visible(NOW_MANAGING_XPATH, timeout=30)
-            return server_id, _get_server_name(sb), True  # FIX
+            return server_id, server_name, True  # FIX
         except Exception:
             screenshot(sb, f"goto_server_failed_{int(time.time())}.png")
             return server_id, None, False  # FIX
@@ -358,7 +362,7 @@ def _post_login_visit_then_logout(sb: SB) -> Tuple[Optional[str], Optional[str],
         sb.wait_for_element_visible("body", timeout=30)
     except Exception:
         screenshot(sb, f"back_home_failed_{int(time.time())}.png")
-        return server_id, None, False  # FIX
+        return server_id, server_name, False  # FIX
 
     stay2 = random.randint(3, 5)
     print(f"⏳ 首页停留 {stay2} 秒...")
@@ -378,7 +382,7 @@ def _post_login_visit_then_logout(sb: SB) -> Tuple[Optional[str], Optional[str],
             sb.open(logout_url)  # FIX
         except Exception:
             screenshot(sb, f"logout_click_failed_{int(time.time())}.png")
-            return server_id, None, False  # FIX
+            return server_id, server_name, False  # FIX
 
     # logout 后也可能弹 CF / 重定向中间页  # FIX
     _try_click_captcha(sb, "logout 后")  # CF  # FIX
@@ -393,18 +397,18 @@ def _post_login_visit_then_logout(sb: SB) -> Tuple[Optional[str], Optional[str],
             url_now = ""
 
         if "/login" in url_now:
-            return server_id, _get_server_name(sb), True  # FIX
+            return server_id, server_name, True  # FIX
 
         try:
             if sb.is_element_visible(EMAIL_SEL) and sb.is_element_visible(PASS_SEL):
-                return server_id, _get_server_name(sb), True  # FIX
+                return server_id, server_name, True  # FIX
         except Exception:
             pass
 
         time.sleep(1)
 
     screenshot(sb, f"logout_verify_failed_{int(time.time())}.png")
-    return server_id, None, False  # FIX
+    return server_id, server_name, False  # FIX
 
 
 def login_then_flow_one_account(email: str, password: str) -> Tuple[str, Optional[str], bool, str, Optional[str], bool]:  # FIX server_name
@@ -444,8 +448,6 @@ def login_then_flow_one_account(email: str, password: str) -> Tuple[str, Optiona
         sb.click(SUBMIT_SEL)
         sb.wait_for_element_visible("body", timeout=30)
         time.sleep(2)
-
-        # screenshot(sb, f"login_ready_01_{int(time.time())}.png")
 
         # CF: 提交后再试一次（很多站是提交后才弹）
         _try_click_captcha(sb, "提交后")  # CF
