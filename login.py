@@ -12,8 +12,8 @@ from pyvirtualdisplay import Display
 """
 批量登录 https://betadash.lunes.host/login?next=/
 登录成功后：
-  0) 从登录成功后的“Manage Servers”界面里，找到 <a href="/servers/63585" class="server-card">
-     - 提取 href 里的数字作为 server_id（例如 63585）
+  0) 从登录成功后的“Manage Servers”界面里，找到 <a href="/servers/12399" class="server-card">
+     - 提取 href 里的数字作为 server_id（例如 12399）
      - 点击该 a（或 open 对应 URL），进入 server 控制台页（等 “Now managing” 出现）
   1) server 页停留 4-6 秒
   2) 返回 https://betadash.lunes.host/ 页面，停留 3-5 秒
@@ -47,7 +47,7 @@ LOGOUT_SEL = 'a[href="/logout"].action-btn.ghost'
 # ✅ server 页面加载成功标志：出现 “Now managing”
 NOW_MANAGING_XPATH = 'xpath=//p[contains(normalize-space(.), "Now managing")]'
 
-# ✅ 服务器卡片（你给的）：<a href="/servers/63585" class="server-card">
+# ✅ 服务器卡片（你给的）：<a href="/servers/12399" class="server-card">
 SERVER_CARD_LINK_SEL = 'a.server-card[href^="/servers/"]'
 
 
@@ -164,6 +164,39 @@ def _try_click_captcha(sb: SB, stage: str):
         print(f"⚠️ captcha 点击异常（{stage}）：{e}")  # CF
 
 
+def _robust_click(sb: SB, sel: str, *, tries: int = 3, sleep_s: float = 0.6) -> bool:
+    """
+    # FIX: 更稳的 click（模拟人优先，必要时 JS 强制点击 + 重试）
+    解决：滚动/遮挡/动画/过渡导致 click 偶发失效
+    """
+    last_err = None
+    for t in range(1, tries + 1):
+        try:
+            sb.scroll_to(sel)
+            time.sleep(0.2)
+
+            # 1) 常规 click（更像人）
+            sb.click(sel)
+            time.sleep(sleep_s)
+            return True
+        except Exception as e1:
+            last_err = e1
+            try:
+                # 2) JS click 兜底
+                sb.execute_script(
+                    "var el=document.querySelector(arguments[0]); if(el){el.click(); return true;} return false;",
+                    sel,
+                )
+                time.sleep(sleep_s)
+                return True
+            except Exception as e2:
+                last_err = e2
+                time.sleep(0.3)
+
+    print(f"⚠️ robust_click 失败：{sel} err={last_err}")
+    return False
+
+
 def _is_logged_in(sb: SB) -> Tuple[bool, Optional[str]]:
     """
     登录成功特征（业务判定，不属于 CF 逻辑）：
@@ -190,7 +223,7 @@ def _is_logged_in(sb: SB) -> Tuple[bool, Optional[str]]:
 
 def _extract_server_id_from_href(href: str) -> Optional[str]:
     """
-    从 "/servers/63585" 或 "https://.../servers/63585" 提取 63585
+    从 "/servers/12399" 或 "https://.../servers/12399" 提取 12399
     """
     if not href:
         return None
@@ -203,7 +236,8 @@ def _find_server_id_and_go_server_page(sb: SB) -> Tuple[Optional[str], bool]:
     在登录成功后的页面里：
       - 找到 a.server-card[href^="/servers/"]
       - 提取 server_id
-      - 点击这个 a 进入 server 页（并等待 Now managing）
+      - 优先模拟人：点击这个 a 进入 server 页（并等待 Now managing）
+      - 若模拟人失败：最后降级为用 SERVER_URL_TPL 直接 open
     返回 (server_id, entered_ok)
     """
     try:
@@ -219,32 +253,64 @@ def _find_server_id_and_go_server_page(sb: SB) -> Tuple[Optional[str], bool]:
         href = ""
 
     server_id = _extract_server_id_from_href(href)
-
     if not server_id:
         screenshot(sb, f"server_id_extract_failed_{int(time.time())}.png")
         return None, False
 
-    # 进入 server 页面：优先 click（符合你说的“点击 a 标签会跳转”）
-    try:
-        print(f"🧭 提取到 server_id={server_id}，点击 server-card 跳转...")
-        sb.scroll_to(SERVER_CARD_LINK_SEL)
-        time.sleep(0.3)
-        sb.click(SERVER_CARD_LINK_SEL)
+    server_url = SERVER_URL_TPL.format(server_id=server_id)
 
-        # 等待 “Now managing” 出现，确认 server 页加载成功
-        sb.wait_for_element_visible(NOW_MANAGING_XPATH, timeout=30)
-        return server_id, True
+    # ✅ 进入 server 页面：优先 click（模拟人）
+    try:
+        print(f"🧭 提取到 server_id={server_id}，优先点击 server-card 跳转...")  # FIX
+
+        url_before = (sb.get_current_url() or "").strip()
+        clicked = _robust_click(sb, SERVER_CARD_LINK_SEL, tries=3, sleep_s=0.7)  # FIX
+        url_after = (sb.get_current_url() or "").strip()
+
+        print(f"🔎 URL(before)={url_before}")  # FIX
+        print(f"🔎 URL(after )={url_after}")  # FIX
+
+        if not clicked:
+            raise Exception("robust_click failed")
+
+        # 进入 /servers/xxx 后也可能弹 CF（这里再补一次）  # FIX
+        # _try_click_captcha(sb, "进入 server 页后")  # CF  # FIX
+        sb.wait_for_element_visible("body", timeout=30)
+
+        # ✅ 双判据：Now managing 或 URL 已到 /servers/{id}（避免 SPA 慢渲染误判）  # FIX
+        for _ in range(30):
+            try:
+                if sb.is_element_visible(NOW_MANAGING_XPATH):
+                    return server_id, True
+            except Exception:
+                pass
+
+            try:
+                u = (sb.get_current_url() or "")
+                if f"/servers/{server_id}" in u:
+                    # 给 SPA 一点渲染时间
+                    time.sleep(1)
+                    return server_id, True
+            except Exception:
+                pass
+
+            time.sleep(1)
+
+        raise Exception("server page not confirmed by NOW_MANAGING/URL")
+
     except Exception:
-        # click 失败兜底：直接 open 目标 URL
+        # ❗ 模拟人失败：最后降级 open 目标 URL  # FIX
         try:
-            server_url = SERVER_URL_TPL.format(server_id=server_id)
-            print(f"⚠️ 点击跳转失败，改为直接打开：{server_url}")
+            print(f"⚠️ 点击跳转失败，降级为直接打开：{server_url}")  # FIX
             sb.open(server_url)
+            sb.wait_for_element_visible("body", timeout=30)
+            _try_click_captcha(sb, "open server_url 后")  # CF  # FIX
             sb.wait_for_element_visible(NOW_MANAGING_XPATH, timeout=30)
             return server_id, True
         except Exception:
             screenshot(sb, f"goto_server_failed_{int(time.time())}.png")
             return server_id, False
+
 
 
 def _post_login_visit_then_logout(sb: SB) -> Tuple[Optional[str], bool]:
@@ -279,33 +345,44 @@ def _post_login_visit_then_logout(sb: SB) -> Tuple[Optional[str], bool]:
     print(f"⏳ 首页停留 {stay2} 秒...")
     time.sleep(stay2)
 
-    # 3) 点退出
-    try:
-        sb.wait_for_element_visible(LOGOUT_SEL, timeout=15)
-        sb.scroll_to(LOGOUT_SEL)
-        time.sleep(0.3)
-        sb.click(LOGOUT_SEL)
-    except Exception:
-        screenshot(sb, f"logout_click_failed_{int(time.time())}.png")
-        return server_id, False
 
+    # 3) 点退出（优先模拟人 click；失败再降级 open /logout）  # FIX
+    try:
+        sb.wait_for_element_visible(LOGOUT_SEL, timeout=20)
+        ok = _robust_click(sb, LOGOUT_SEL, tries=3, sleep_s=0.7)  # FIX
+        if not ok:
+            raise Exception("robust_click logout failed")  # FIX
+    except Exception:
+        try:
+            logout_url = HOME_URL.rstrip("/") + "/logout"  # FIX
+            print(f"⚠️ logout click 失败，降级 open：{logout_url}")  # FIX
+            sb.open(logout_url)  # FIX
+        except Exception:
+            screenshot(sb, f"logout_click_failed_{int(time.time())}.png")
+            return server_id, False
+
+    # logout 后也可能弹 CF / 重定向中间页  # FIX
+    _try_click_captcha(sb, "logout 后")  # CF  # FIX
     sb.wait_for_element_visible("body", timeout=30)
-    time.sleep(1)
 
-    # 退出成功：回到登录页（#email 出现）或 URL 包含 /login
-    try:
-        url_now = (sb.get_current_url() or "").lower()
-    except Exception:
-        url_now = ""
 
-    if "/login" in url_now:
-        return server_id, True
+    # 退出成功：回到登录页（#email 出现）或 URL 包含 /login  # FIX
+    for _ in range(30):  # 最多等 30 秒，给重定向/挑战页足够时间  # FIX
+        try:
+            url_now = (sb.get_current_url() or "").lower()
+        except Exception:
+            url_now = ""
 
-    try:
-        if sb.is_element_visible(EMAIL_SEL) and sb.is_element_visible(PASS_SEL):
+        if "/login" in url_now:
             return server_id, True
-    except Exception:
-        pass
+
+        try:
+            if sb.is_element_visible(EMAIL_SEL) and sb.is_element_visible(PASS_SEL):
+                return server_id, True
+        except Exception:
+            pass
+
+        time.sleep(1)
 
     screenshot(sb, f"logout_verify_failed_{int(time.time())}.png")
     return server_id, False
