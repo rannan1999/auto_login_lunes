@@ -1,4 +1,3 @@
-
 import os
 import platform
 import time
@@ -67,11 +66,11 @@ def mask_email_keep_domain(email: str) -> str:
     return f"{name_mask}@{domain}"
 
 
-
 def mask_url_hide_server_id(url: str) -> str:
     """# FIX: Hide /servers/<id> in URLs to avoid leaking sensitive server_id."""
     u = (url or "").strip()
     return re.sub(r"/servers/\d+", "/servers/***", u)  # FIX
+
 
 def setup_xvfb():
     if platform.system().lower() == "linux" and not os.environ.get("DISPLAY"):
@@ -208,10 +207,29 @@ def _robust_click(sb: SB, sel: str, *, tries: int = 3, sleep_s: float = 0.6) -> 
 def _is_logged_in(sb: SB) -> Tuple[bool, Optional[str]]:
     """
     登录成功特征（业务判定，不属于 CF 逻辑）：
-      - h1.hero-title 包含 Welcome back
+      - URL 不包含 /login   # FIX
+      - 或 server-card 可见  # FIX
+      - 或 h1.hero-title 包含 Welcome back
       - 或 LOGOUT 按钮可见
     """
     welcome_text = None
+
+    # 1) URL 判据（最通用）  # FIX
+    try:
+        u = (sb.get_current_url() or "").lower()
+        if "/login" not in u:
+            return True, welcome_text
+    except Exception:
+        pass
+
+    # 2) server-card 判据（后续流程也依赖它）  # FIX
+    try:
+        if sb.is_element_visible(SERVER_CARD_LINK_SEL):
+            return True, welcome_text
+    except Exception:
+        pass
+
+    # 3) 旧的 welcome 判据（保留）
     try:
         if sb.is_element_visible("h1.hero-title"):
             welcome_text = (sb.get_text("h1.hero-title") or "").strip()
@@ -220,6 +238,7 @@ def _is_logged_in(sb: SB) -> Tuple[bool, Optional[str]]:
     except Exception:
         pass
 
+    # 4) logout 判据（保留）
     try:
         if sb.is_element_visible(LOGOUT_SEL):
             return True, welcome_text
@@ -237,6 +256,8 @@ def _extract_server_id_from_href(href: str) -> Optional[str]:
         return None
     m = re.search(r"/servers/(\d+)", href)
     return m.group(1) if m else None
+
+
 def _get_server_name(sb: SB) -> Optional[str]:
     """# FIX: Read server name from server page (the <h1> next to 'Now managing').
     Why name might be None:
@@ -253,6 +274,7 @@ def _get_server_name(sb: SB) -> Optional[str]:
             pass
         time.sleep(0.3)
     return None
+
 
 def _find_server_id_and_go_server_page(sb: SB) -> Tuple[Optional[str], Optional[str], bool]:  # FIX
     """
@@ -307,9 +329,6 @@ def _find_server_id_and_go_server_page(sb: SB) -> Tuple[Optional[str], Optional[
                     server_name = _get_server_name(sb)  # FIX
                     if server_name:
                         print(f"🖥️ Server name: {server_name}")  # FIX
-                    server_name = _get_server_name(sb)  # FIX
-                    if server_name:
-                        print(f"🖥️ Server name: {server_name}")  # FIX
                     return server_id, server_name, True  # FIX
             except Exception:
                 pass
@@ -345,7 +364,6 @@ def _find_server_id_and_go_server_page(sb: SB) -> Tuple[Optional[str], Optional[
         except Exception:
             screenshot(sb, f"goto_server_failed_{int(time.time())}.png")
             return server_id, None, False  # FIX
-
 
 
 def _post_login_visit_then_logout(sb: SB) -> Tuple[Optional[str], Optional[str], bool]:  # FIX
@@ -384,7 +402,6 @@ def _post_login_visit_then_logout(sb: SB) -> Tuple[Optional[str], Optional[str],
     print(f"⏳ 首页停留 {stay2} 秒...")
     time.sleep(stay2)
 
-
     # 3) 点退出（优先模拟人 click；失败再降级 open /logout）  # FIX
     try:
         sb.wait_for_element_visible(LOGOUT_SEL, timeout=20)
@@ -404,7 +421,6 @@ def _post_login_visit_then_logout(sb: SB) -> Tuple[Optional[str], Optional[str],
     _try_click_captcha(sb, "logout 后")  # CF  # FIX
     sb.wait_for_element_visible("body", timeout=30)
 
-
     # 退出成功：回到登录页（#email 出现）或 URL 包含 /login  # FIX
     for _ in range(30):  # 最多等 30 秒，给重定向/挑战页足够时间  # FIX
         try:
@@ -423,7 +439,7 @@ def _post_login_visit_then_logout(sb: SB) -> Tuple[Optional[str], Optional[str],
 
         time.sleep(1)
 
-        # FIX: last-chance logout via direct open
+    # FIX: last-chance logout via direct open
     try:
         logout_url = HOME_URL.rstrip("/") + "/logout"
         sb.open(logout_url)
@@ -497,13 +513,37 @@ def login_then_flow_one_account(email: str, password: str) -> Tuple[str, Optiona
         # ===== 业务：判定登录成功 =====
         welcome_text = None
         logged_in = False
-        for _ in range(10):  # 最多等 ~10 秒
+
+        # FIX: 等待从 10 秒拉到 30 秒，更抗重定向/挑战页/SPA 慢渲染
+        for _ in range(30):
             logged_in, welcome_text = _is_logged_in(sb)
             if logged_in:
                 break
             time.sleep(1)
 
         if not logged_in:
+            # FIX: 尝试抓页面错误提示，便于定位是账号问题还是被拦/校验失败
+            err_text = None
+            try:
+                candidates = [".alert", ".error", ".toast", ".notification", "div[role='alert']"]
+                for c in candidates:
+                    if sb.is_element_visible(c):
+                        t = (sb.get_text(c) or "").strip()
+                        if t:
+                            err_text = t
+                            break
+            except Exception:
+                pass
+
+            if err_text:
+                print(f"❗ 登录失败提示：{err_text}")  # FIX
+
+            # FIX: 更新一下当前 URL，避免日志用到旧值
+            try:
+                current_url = (sb.get_current_url() or "").strip()
+            except Exception:
+                pass
+
             return "FAIL", welcome_text, has_cf, mask_url_hide_server_id(current_url), None, False  # FIX
 
         # ===== 业务：登录后提取 server_id -> 进 server 页 -> 回首页 -> 退出 =====
@@ -544,7 +584,6 @@ def main():
 
             try:
                 status, welcome_text, has_cf, url_now, server_name, logout_ok = login_then_flow_one_account(  # FIX
-
                     email, password
                 )
 
